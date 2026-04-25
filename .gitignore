@@ -1,0 +1,35 @@
+# Build artifacts
+*.o
+*.ptx
+*.cubin
+*.fatbin
+*.fatbin.c
+*.ii
+*.module_id
+*.cudafe1.*
+a_dlink.*
+gpu_dlink.o
+rckangaroo
+
+# CUDA intermediate
+*.sm_*.cubin
+*.reg.c
+
+# Runtime data
+*.state
+*.work
+*.kangs
+*.dat
+kfactor_log.csv
+batch_k_results.txt
+build.log
+build_lb2.log
+
+# Keys / sensitive
+key_backup_*.txt
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+*.user
