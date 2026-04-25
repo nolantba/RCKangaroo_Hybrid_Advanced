@@ -146,3 +146,73 @@ puzzles/puzzle120.txt
 ## License
 
 See [LICENSE.TXT](LICENSE.TXT).
+
+---
+
+## Repository
+
+```bash
+git clone https://github.com/nolantba/RCKangaroo_Hybrid_Advanced.git
+cd RCKangaroo_Hybrid_Advanced
+make SM=86 USE_JACOBIAN=1 PROFILE=release -j
+```
+
+---
+
+## Example output
+
+### Live monitor
+```
+================================================================
+  GPU Performance Monitor
+================================================================
+GPU 0:  1.32 GK/s  |   65°C  |  170W  |  100% util  |  PCI 3
+         seed: 0x409AC75694CC7A37
+GPU 1:  1.34 GK/s  |   64°C  |  170W  |  100% util  |  PCI 4
+         seed: 0xE2C34D9D1512FE08
+GPU 2:  1.32 GK/s  |   71°C  |  169W  |  100% util  |  PCI 132
+         seed: 0x040BD3C39659721D
+CPU:  348.2 MK/s
+Total:  4.33 GK/s  |  Avg Temp: 66°C  |  Power: 509W
+K-Factor:  0.266  OK (ahead of schedule)  |  P(solve):  23.4%
+K trend:  ▁  0.30–0.31
+DPs:  10267255 / 13642775 (75.3%)  |  Rate:  172440/s  |  Buffer:  0 / 134217728 (0.0%)
+ETA:  0d 00h 00m:37s  |  Ops: 2^35.79 / 2^37.70
+⚡ Cost:  509W gpu  +  621W sys  =  1130W total  |  $0.1412/hr  |  Session: 0.20 cents  |  Daily: $3.39  |  Annual: $1237
+Algo:  SOTA+ ✗  |  Jacobian ✓  |  LISSA ✓  |  R2-4V ✓  |  J1 ~2^37.6  |  J2=2^65  |  J3=2^63
+Seq:   phi+0.8783  psi+0.2910  H5-scr  H7-scr  |  salt=0x13AC0121
+       V0[-------*-]  V1[--*------]  V2[Owen/5]  V3[Owen/7]
+Dist:  0.0μ         1.0μ (μ)         2.0μ
+  V0 [----------##########|#########----------] phi  [0.50–1.50μ]
+  V1 [------##############|############-------] psi  [0.33–1.67μ]
+  V2 [-----###############|##############-----] H(5) [0.25–1.75μ]
+  V3 [--------############|###########--------] H(7) [0.40–1.60μ]
+  Rnd [-------#--#-##-###-#|#-#####-#-##-#--#--] random (clustered near μ, gaps at edges)
+================================================================
+```
+
+### Solve
+```
+┌──────────────────────────────────────────┐
+│           SESSION SUMMARY               │
+├──────────────────────────────────────────┤
+│ Status    : SOLVED ✓                   │
+│ Time      : 0d 00h 00m 10s             │
+│ Ops       : 2^36.166                   │
+│ Avg Speed : 7015 MK/s                  │
+│ Peak Spd  : 7015 MK/s                  │
+│ Solve K   : 0.397                      │
+│ Errors    : 0                          │
+│ CSV log   : kfactor_log.csv            │
+└──────────────────────────────────────────┘
+╔════════════════════════════════════════════════════════════════════════╗
+║                                KEY FOUND                                 ║
+╠════════════════════════════════════════════════════════════════════════╣
+║  HEX: 0000000000000000000000000000000000000000000004C5CE114686A1336E07 ║
+║  WIF: KwDiBf89QgGbjEhKnhXJuH7LrciVrZi3yHuxB7NfERRuDTNy2kbr             ║
+║  ADR: 1G4uP62J6ViZQEtDGU1N9TKCsXaDN4kPiX                               ║
+╠════════════════════════════════════════════════════════════════════════╣
+║  SWP: bc1q54rdcf9d830k8j3m7c7sf489q99mqm2fx2apwp                       ║
+╚════════════════════════════════════════════════════════════════════════╝
+  Verification: k*G == pubkey  OK
+```
