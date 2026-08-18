@@ -1,0 +1,65 @@
+# ── Build artifacts ───────────────────────────────────────────────────────────
+*.o
+*.a
+*.so
+rckangaroo
+build.log
+build_lb2.log
+ncu_profile.log
+
+# ── CUDA intermediate files ───────────────────────────────────────────────────
+*.ii
+*.fatbin
+*.fatbin.c
+*.cubin
+*.ptx
+*.module_id
+*.reg.c
+*.cudafe1.c
+*.cudafe1.cpp
+*.cudafe1.gpu
+*.cudafe1.stub.c
+a_dlink.*
+gpu_dlink.o
+
+# ── SENSITIVE — private keys, never commit ────────────────────────────────────
+RESULTS.TXT
+key_backup_*.txt
+*.key
+*.priv
+
+# ── Runtime / session files ───────────────────────────────────────────────────
+*.work
+*.state
+kfactor_log.csv
+*.csv
+
+# ── Redundant old docs ────────────────────────────────────────────────────────
+BUILD_SOTA_PLUS.md
+COMPLETE_PROJECT_README*.md
+CYCLE_SOLUTION_COMPLETE.md
+DEPLOY_HERDS.md
+HERDS_QUICK_START.md
+HERD_IMPLEMENTATION_ANALYSIS.md
+HERD_README.md
+HYBRID_README.md
+PERSISTENT_KERNELS.md
+PERSISTENT_KERNEL_DESIGN.md
+QUICK_START_HERDS.txt
+SAVE_RESUME_GUIDE.md
+SOTA++_HERDS_IMPLEMENTATION.md
+SOTA_PLUS_DESIGN.md
+"Command Lines.txt"
+"Herds Command Lines.txt"
+
+# ── Backup files ──────────────────────────────────────────────────────────────
+*.backup
+defs.h.backup
+
+# ── Test logs ─────────────────────────────────────────────────────────────────
+test_results/
+
+# ── Windows VS project files (optional — remove these lines to include them) ──
+RCKangaroo.sln
+RCKangaroo.vcxproj
+RCKangaroo.vcxproj.user
