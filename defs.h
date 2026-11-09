@@ -60,6 +60,14 @@ typedef short i16;
 // Frees 32KB shared mem per SM block (J1 served from 3MB L2 cache ~192KB footprint)
 #define USE_R2_4V 1
 #endif
+
+#ifndef USE_BRANCHLESS_FIELD_OPS
+// 1 to enable branchless AddModP/SubModP using PTX setp/selp predication
+// Eliminates warp divergence from if(carry) branches in field arithmetic
+// NOTE: Set to 0 (default/safe). Enable only after correctness testing on Puzzle 75.
+// Known issue: runs faster but solve fails when enabled — predicate logic under review
+#define USE_BRANCHLESS_FIELD_OPS 0
+#endif
 // ============================================================================
 
 typedef unsigned char u8;

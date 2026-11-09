@@ -88,7 +88,7 @@ __device__ __forceinline__ void NegModP(u64* res)
 	subc_64(res[3], P_123, res[3]);
 }
 
-__device__ __forceinline__ void SubModP(u64* res, u64* val1, u64* val2)
+__device__ __forceinline__ void SubModP_Original(u64* res, u64* val1, u64* val2)
 {
 	sub_cc_64(res[0], val1[0], val2[0]);
     subc_cc_64(res[1], val1[1], val2[1]);
@@ -105,7 +105,39 @@ __device__ __forceinline__ void SubModP(u64* res, u64* val1, u64* val2)
     }
 }
 
-__device__ __forceinline__ void AddModP(u64* res, u64* val1, u64* val2)
+// Branchless SubModP: uses PTX setp/selp to avoid warp divergence
+// val1 - val2: if borrow, add P back via predicated select (no branch)
+__device__ __forceinline__ void SubModP_Branchless(u64* res, u64* val1, u64* val2)
+{
+    u64 tmp[4];
+    sub_cc_64(tmp[0], val1[0], val2[0]);
+    subc_cc_64(tmp[1], val1[1], val2[1]);
+    subc_cc_64(tmp[2], val1[2], val2[2]);
+    subc_cc_64(tmp[3], val1[3], val2[3]);
+    u32 borrow;
+    subc_32(borrow, 0, 0);  // borrow = 0xFFFFFFFF if underflow, 0 otherwise
+    u64 adj[4];
+    add_cc_64(adj[0], tmp[0], P_0);
+    addc_cc_64(adj[1], tmp[1], P_123);
+    addc_cc_64(adj[2], tmp[2], P_123);
+    addc_64(adj[3], tmp[3], P_123);
+    // Select adj (corrected) if borrow != 0, else tmp (original)
+    asm volatile (
+        "{\n\t"
+        ".reg .pred p;\n\t"
+        "setp.ne.u32 p, %8, 0;\n\t"
+        "selp.u64 %0, %9,  %4, p;\n\t"
+        "selp.u64 %1, %10, %5, p;\n\t"
+        "selp.u64 %2, %11, %6, p;\n\t"
+        "selp.u64 %3, %12, %7, p;\n\t"
+        "}\n"
+        : "=l"(res[0]), "=l"(res[1]), "=l"(res[2]), "=l"(res[3])
+        : "l"(tmp[0]), "l"(tmp[1]), "l"(tmp[2]), "l"(tmp[3]),
+          "r"(borrow), "l"(adj[0]), "l"(adj[1]), "l"(adj[2]), "l"(adj[3])
+    );
+}
+
+__device__ __forceinline__ void AddModP_Original(u64* res, u64* val1, u64* val2)
 {
 	u64 tmp[4];
 	u32 carry;
@@ -125,6 +157,62 @@ __device__ __forceinline__ void AddModP(u64* res, u64* val1, u64* val2)
 	if (carry)
 		Copy_u64_x4(res, tmp);
 }
+
+// Branchless AddModP: compute sum, subtract P, use setp/selp to pick correct result
+__device__ __forceinline__ void AddModP_Branchless(u64* res, u64* val1, u64* val2)
+{
+    u64 tmp[4];
+    u32 carry;
+    add_cc_64(tmp[0], val1[0], val2[0]);
+    addc_cc_64(tmp[1], val1[1], val2[1]);
+    addc_cc_64(tmp[2], val1[2], val2[2]);
+    addc_cc_64(tmp[3], val1[3], val2[3]);
+    addc_32(carry, 0, 0);
+    // reduced = tmp - P
+    u64 red[4];
+    u32 borrow;
+    sub_cc_64(red[0], tmp[0], P_0);
+    subc_cc_64(red[1], tmp[1], P_123);
+    subc_cc_64(red[2], tmp[2], P_123);
+    subc_cc_64(red[3], tmp[3], P_123);
+    subc_32(borrow, 0, 0);  // borrow if tmp < P (no reduction needed)
+    // need_reduce = carry || !borrow  (sum >= P or overflowed 256 bits)
+    // Use: if carry=1, always pick red. If carry=0, pick red only if !borrow
+    u32 sel;
+    asm volatile (
+        "{\n\t"
+        ".reg .pred pc, pb;\n\t"
+        "setp.ne.u32 pc, %0, 0;\n\t"   // pc = (carry != 0)
+        "setp.eq.u32 pb, %1, 0;\n\t"   // pb = (borrow == 0)
+        "or.pred     pc, pc, pb;\n\t"   // pc = carry || !borrow
+        "selp.u32    %0, 1, 0, pc;\n\t"
+        "}\n"
+        : "+r"(sel)
+        : "r"(carry), "r"(borrow)
+    );
+    asm volatile (
+        "{\n\t"
+        ".reg .pred p;\n\t"
+        "setp.ne.u32 p, %8, 0;\n\t"
+        "selp.u64 %0, %4, %9,  p;\n\t"
+        "selp.u64 %1, %5, %10, p;\n\t"
+        "selp.u64 %2, %6, %11, p;\n\t"
+        "selp.u64 %3, %7, %12, p;\n\t"
+        "}\n"
+        : "=l"(res[0]), "=l"(res[1]), "=l"(res[2]), "=l"(res[3])
+        : "l"(red[0]), "l"(red[1]), "l"(red[2]), "l"(red[3]),
+          "r"(sel),
+          "l"(tmp[0]), "l"(tmp[1]), "l"(tmp[2]), "l"(tmp[3])
+    );
+}
+
+#if USE_BRANCHLESS_FIELD_OPS
+#define SubModP SubModP_Branchless
+#define AddModP AddModP_Branchless
+#else
+#define SubModP SubModP_Original
+#define AddModP AddModP_Original
+#endif
 
 __device__ __forceinline__ void add_320_to_256(u64* res, u64* val)
 {
