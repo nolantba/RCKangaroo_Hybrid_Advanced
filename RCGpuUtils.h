@@ -182,12 +182,12 @@ __device__ __forceinline__ void AddModP_Branchless(u64* res, u64* val1, u64* val
     asm volatile (
         "{\n\t"
         ".reg .pred pc, pb;\n\t"
-        "setp.ne.u32 pc, %0, 0;\n\t"   // pc = (carry != 0)
-        "setp.eq.u32 pb, %1, 0;\n\t"   // pb = (borrow == 0)
+        "setp.ne.u32 pc, %1, 0;\n\t"   // pc = (carry != 0)
+        "setp.eq.u32 pb, %2, 0;\n\t"   // pb = (borrow == 0)
         "or.pred     pc, pc, pb;\n\t"   // pc = carry || !borrow
         "selp.u32    %0, 1, 0, pc;\n\t"
         "}\n"
-        : "+r"(sel)
+        : "=r"(sel)
         : "r"(carry), "r"(borrow)
     );
     asm volatile (

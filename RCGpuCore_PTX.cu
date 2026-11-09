@@ -29,7 +29,7 @@ __device__ __forceinline__ int clz256(const u64* x)
 
 #ifndef OLD_GPU
 
-extern "C" __launch_bounds__(BLOCK_SIZE, 3)
+extern "C" __launch_bounds__(BLOCK_SIZE, 1)
 __global__ void KernelA(const TKparams Kparams)
 {
     u64* L2x = Kparams.L2 + 2 * THREAD_X + 4 * BLOCK_SIZE * BLOCK_CNT * 0 + 4 * BLOCK_SIZE * BLOCK_X;
@@ -234,8 +234,9 @@ __global__ void KernelA(const TKparams Kparams)
                 u32 ind = atomicAdd(Kparams.DPTable + kang_ind2, 1);
                 if (ind < DPTABLE_MAX_CNT)
                 {
-                    int4* dst = (int4*)(Kparams.DPTable + Kparams.KangCnt + (kang_ind2 * DPTABLE_MAX_CNT + ind) * 4);
-                    dst[0] = ((int4*)x)[0];
+                    int4* dst = (int4*)(Kparams.DPTable + Kparams.KangCnt + (kang_ind2 * DPTABLE_MAX_CNT + ind) * 8);
+                    dst[0] = ((int4*)x)[0]; // x_lo (bits 0-127)
+                    dst[1] = ((int4*)x)[1]; // x_hi (bits 128-255) for endomorphism
                 }
             }
 
@@ -497,8 +498,9 @@ __global__ void KernelA(const TKparams Kparams)
                 u32 ind = atomicAdd(Kparams.DPTable + kang_ind2, 1);
                 if (ind < DPTABLE_MAX_CNT)
                 {
-                    int4* dst = (int4*)(Kparams.DPTable + Kparams.KangCnt + (kang_ind2 * DPTABLE_MAX_CNT + ind) * 4);
-                    dst[0] = ((int4*)x)[0];
+                    int4* dst = (int4*)(Kparams.DPTable + Kparams.KangCnt + (kang_ind2 * DPTABLE_MAX_CNT + ind) * 8);
+                    dst[0] = ((int4*)x)[0]; // x_lo (bits 0-127)
+                    dst[1] = ((int4*)x)[1]; // x_hi (bits 128-255) for endomorphism
                     jmp_ind |= DP_FLAG;
                 }
             }
@@ -582,14 +584,18 @@ __device__ __forceinline__ void BuildDP(const TKparams& Kparams, int kang_ind, u
     ind >>= 16;
     if (ind >= DPTABLE_MAX_CNT)
         return;
-    int4 rx = *(int4*)(Kparams.DPTable + Kparams.KangCnt + (kang_ind * DPTABLE_MAX_CNT + ind) * 4);
+    const int4* base = (const int4*)(Kparams.DPTable + Kparams.KangCnt + (kang_ind * DPTABLE_MAX_CNT + ind) * 8);
+    int4 rx    = base[0]; // x_lo (bits   0-127)
+    int4 rx_hi = base[1]; // x_hi (bits 128-255) — for endomorphism lookup on CPU
     u32 pos = atomicAdd(Kparams.DPs_out, 1);
     pos = min(pos, Kparams.DpBufCnt - 1);
     u32* DPs = Kparams.DPs_out + 4 + pos * GPU_DP_SIZE / 4;
-    *(int4*)&DPs[0] = rx;
-    *(int4*)&DPs[4] = ((int4*)d)[0];
-    *(u64*)&DPs[8] = d[2];
-    DPs[10] = 3 * kang_ind / Kparams.KangCnt;
+    *(int4*)&DPs[0]  = rx;               // bytes  0-15: x_lo
+    *(int4*)&DPs[4]  = ((int4*)d)[0];    // bytes 16-31: dist[0..1]
+    *(u64*)&DPs[8]   = d[2];             // bytes 32-39: dist[2]
+    DPs[10]          = 3 * kang_ind / Kparams.KangCnt; // bytes 40-43: type
+    // DPs[11]       = 0;                // bytes 44-47: padding (implicit)
+    *(int4*)&DPs[12] = rx_hi;            // bytes 48-63: x_hi (endomorphism)
 }
 
 __device__ __forceinline__ bool ProcessJumpDistance(u32 step_ind, u32 d_cur, u64* d, u32 kang_ind, u64* jmp1_d, u64* jmp2_d, const TKparams& Kparams, u64* table, u32* cur_ind, u8 iter)
@@ -635,12 +641,14 @@ __device__ __forceinline__ bool ProcessJumpDistance(u32 step_ind, u32 d_cur, u64
     if (found_ind < 0)
     {
         bool emit = false;
-        int4 rx_local;
+        int4 rx_local, rx_hi_local;
         if (d_cur & DP_FLAG) {
             int idx = atomicAdd(Kparams.DPTable + kang_ind, 0x10000);
             idx >>= 16;
             if (idx < DPTABLE_MAX_CNT) {
-                rx_local = *(int4*)(Kparams.DPTable + Kparams.KangCnt + (kang_ind * DPTABLE_MAX_CNT + idx) * 4);
+                const int4* base_ptr = (const int4*)(Kparams.DPTable + Kparams.KangCnt + (kang_ind * DPTABLE_MAX_CNT + idx) * 8);
+                rx_local    = base_ptr[0]; // x_lo
+                rx_hi_local = base_ptr[1]; // x_hi (endomorphism)
                 emit = true;
             }
         }
@@ -660,10 +668,11 @@ __device__ __forceinline__ bool ProcessJumpDistance(u32 step_ind, u32 d_cur, u64
                 unsigned outIdx = base + pos;
                 outIdx = min(outIdx, Kparams.DpBufCnt - 1u);
                 u32* DPs = Kparams.DPs_out + 4 + outIdx * (GPU_DP_SIZE / 4);
-                *(int4*)&DPs[0] = rx_local;
-                *(int4*)&DPs[4] = ((int4*)d)[0];
-                *(u64*)&DPs[8] = d[2];
-                DPs[10] = 3 * kang_ind / Kparams.KangCnt;
+                *(int4*)&DPs[0]  = rx_local;              // bytes  0-15: x_lo
+                *(int4*)&DPs[4]  = ((int4*)d)[0];         // bytes 16-31: dist[0..1]
+                *(u64*)&DPs[8]   = d[2];                   // bytes 32-39: dist[2]
+                DPs[10]          = 3 * kang_ind / Kparams.KangCnt; // bytes 40-43: type
+                *(int4*)&DPs[12] = rx_hi_local;            // bytes 48-63: x_hi (endomorphism)
             }
         }
         return false;
@@ -993,4 +1002,6 @@ cudaError_t cuSetGpuParams(TKparams Kparams, u64* _jmp2_table)
     err = cudaFuncSetAttribute(KernelC, cudaFuncAttributeMaxDynamicSharedMemorySize, Kparams.KernelC_LDS_Size);
     if (err != cudaSuccess) return err;
     err = cudaMemcpyToSymbol(jmp2_table, _jmp2_table, JMP_CNT * 64);
-    if (err != cudaSuccess) return
+    if (err != cudaSuccess) return err;
+    return cudaSuccess;
+}
