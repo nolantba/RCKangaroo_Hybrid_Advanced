@@ -20,6 +20,7 @@
 #include "GpuMonitor.h"
 #include "R2_JumpTable.h"
 #include "lissajous_jump_generator.hpp"
+#include "zone_registry.h"
 
 // ANSI color codes
 #define RC_RESET   "\033[0m"
@@ -226,6 +227,10 @@ volatile u64  g_ww_count = 0;   // FAST counter — avoids O(16M) GetBlockCnt() 
 // Shutdown flag — set ONLY by signal handler, checked in main loop.
 // sig_atomic_t is the only type guaranteed safe to write from a signal handler.
 volatile sig_atomic_t g_shutdown_requested = 0;
+
+// Zone-mode support — captured by SolvePoint() before it clears db on return
+u64  g_last_solve_dp_count = 0;
+bool g_save_tames_on_exit  = false;
 
 // ── Background .kangs checkpoint ─────────────────────────────────────────────
 // Periodically saves the full DP database in a background thread.
@@ -1730,6 +1735,18 @@ bool SolvePoint(EcPoint PntToSolve, int Range, int DP, EcInt* pk_res)
 		g_gpu_monitor = nullptr;
 	}
 
+	// Capture DP count before any db.Clear() — zone_mode.cpp reads this after return
+	g_last_solve_dp_count = db.GetBlockCnt();
+
+	// Zone-mode: persist this zone's DP database so the next visit can resume it
+	if (g_save_tames_on_exit && gTamesFileName[0])
+	{
+		db.Header[0] = gRange;
+		if (db.SaveToFile(gTamesFileName))
+			printf("[ZoneMode] DP checkpoint saved: %llu DPs -> %s\r\n",
+			       (unsigned long long)g_last_solve_dp_count, gTamesFileName);
+	}
+
 	// User pressed Ctrl+C — save already done above, just exit cleanly.
 	if (g_shutdown_requested)
 	{
@@ -2181,6 +2198,27 @@ bool ParseCommandLine(int argc, char* argv[])
 				printf("Merge failed!\r\n");
 				exit(1);
 			}
+		}
+		else
+		if (strcmp(argument, "-zone-mode") == 0)
+		{
+			g_zone_mode = true;
+		}
+		else
+		if (strcmp(argument, "-zone-duration") == 0)
+		{
+			if (ci >= argc) { printf("error: missed value after -zone-duration\r\n"); return false; }
+			int val = atoi(argv[ci]); ci++;
+			if (val < 1 || val > 1440) { printf("error: -zone-duration must be 1-1440 minutes\r\n"); return false; }
+			g_zone_duration_mins = val;
+		}
+		else
+		if (strcmp(argument, "-zone-force") == 0)
+		{
+			if (ci >= argc) { printf("error: missed value after -zone-force\r\n"); return false; }
+			int val = atoi(argv[ci]); ci++;
+			if (val < 0 || val >= ZONE_COUNT) { printf("error: -zone-force must be 0-%d\r\n", ZONE_COUNT-1); return false; }
+			g_zone_force_id = val;
 		}
 		else
 		{
@@ -2670,13 +2708,24 @@ int main(int argc, char* argv[])
         gStart.GetHexStr(sx);
         printf("Offset: %s\r\n", sx);
 
-        if (!SolvePoint(PntToSolve, gRange, gDP, &pk_found))
+        if (g_zone_mode)
         {
-            if (!gIsOpsLimit && !g_shutdown_requested)
-                printf("FATAL ERROR: SolvePoint failed\r\n");
-            goto label_end;
+            bool zone_solved = false;
+            RunZoneModeV2(gPubKey, (int)gRange, (int)gRange, &pk_found, &zone_solved);
+            if (!zone_solved)
+                goto label_end;
+            // pk_found already has gStart added by RunZoneModeV2 — skip the AddModP below
         }
-        pk_found.AddModP(gStart);
+        else
+        {
+            if (!SolvePoint(PntToSolve, gRange, gDP, &pk_found))
+            {
+                if (!gIsOpsLimit && !g_shutdown_requested)
+                    printf("FATAL ERROR: SolvePoint failed\r\n");
+                goto label_end;
+            }
+            pk_found.AddModP(gStart);
+        }
         EcPoint tmp = ec.MultiplyG_Lambda(pk_found);
         if (!tmp.IsEqual(gPubKey))
         {

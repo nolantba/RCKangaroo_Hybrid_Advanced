@@ -61,7 +61,7 @@ ifneq ($(USE_NVML),0)
 endif
 
 # Sources (including CPU worker, save/resume system, GPU monitoring, and SOTA++ herds)
-SRC_CPP := RCKangaroo.cpp GpuKang.cpp CpuKang.cpp CpuKang_JLP.cpp Ec.cpp Lambda.cpp utils.cpp WorkFile.cpp XorFilter.cpp GpuMonitor.cpp GpuHerdManager.cpp
+SRC_CPP := RCKangaroo.cpp GpuKang.cpp CpuKang.cpp CpuKang_JLP.cpp Ec.cpp Lambda.cpp utils.cpp WorkFile.cpp XorFilter.cpp GpuMonitor.cpp GpuHerdManager.cpp zone_mode.cpp
 
 # CUDA sources (including herd kernels)
 # RCGpuCore.cu = original baseline (preserved, revert by changing _PTX back)
