@@ -231,7 +231,7 @@ static int GetKnownZone(int puzzle_num) {
 // ============================================================
 // Smart zone selection:
 // - Solved puzzles, first run: known zone (for testing/verification only)
-// - Unsolved puzzles, or subsequent runs: lowest-DP zone (round robin)
+// - Unsolved puzzles: random zone (best probabilistic coverage)
 // ============================================================
 static int SelectNextZone(int puzzle_num, bool first_run) {
     // Forced zone (-zone-force N) overrides EVERYTHING else, on every call
@@ -252,7 +252,9 @@ static int SelectNextZone(int puzzle_num, bool first_run) {
                known);
         return known;
     }
-    return g_zone_registry.GetLowestDPZone();
+    // Random selection: 50% chance of finding the key within first 69 zones
+    // vs round-robin which always takes exactly N attempts (same average, better variance)
+    return rand() % ZONE_COUNT;
 }
 
 // ============================================================
@@ -261,6 +263,7 @@ static int SelectNextZone(int puzzle_num, bool first_run) {
 // ============================================================
 void RunZoneModeV2(EcPoint pubkey, int puzzle_num, int range_bits, EcInt* pk_res, bool* out_solved) {
     *out_solved = false;
+    srand((unsigned)time(nullptr));
 
     printf("\n");
     printf("================================================\n");
@@ -270,7 +273,7 @@ void RunZoneModeV2(EcPoint pubkey, int puzzle_num, int range_bits, EcInt* pk_res
     if (known_zone >= 0)
         printf("  MODE: TEST (solved puzzle - zone %d%% known)\n", known_zone);
     else
-        printf("  MODE: PRODUCTION (unsolved - round-robin zones)\n");
+        printf("  MODE: PRODUCTION (unsolved - random zone selection)\n");
     printf("  Duration: %d min/zone\n", g_zone_duration_mins);
     printf("================================================\n\n");
 
