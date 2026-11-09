@@ -86,6 +86,17 @@ volatile u64 DroppedDPs = 0;
 volatile u64 TotalDPsGenerated = 0;
 u64 PntTotalOps;
 bool IsBench;
+// DP count captured right before SolvePoint() clears its DP database on
+// return (db.Clear() runs on every exit path, so anyone sampling
+// db.GetBlockCnt() *after* SolvePoint() returns -- e.g. zone_mode.cpp's
+// per-zone bookkeeping -- always sees 0 regardless of real activity).
+u64 g_last_solve_dp_count = 0;
+// Opt-in: when set, SolvePoint() saves its accumulated db (loaded tames +
+// everything found this run) back to gTamesFileName right before clearing
+// it, on every exit path. Off by default so normal -tames usage (a static,
+// unchanging trap file) is unaffected -- zone_mode.cpp turns this on only
+// for its own per-zone checkpoint files.
+bool g_save_tames_on_exit = false;
 
 u32 gDP;
 bool gDP_manual = false;   // true when user passed -dp explicitly
@@ -143,6 +154,7 @@ uint64_t g_autosave_interval = 60;  // Default: 60 seconds
 
 // SOTA++ Herds mode
 bool g_use_herds = false;
+
 bool g_force_resume = false;  // skip pubkey check on workfile load (-force-resume)
 time_t g_start_time = 0;
 bool g_resume_mode = false;
@@ -227,10 +239,6 @@ volatile u64  g_ww_count = 0;   // FAST counter — avoids O(16M) GetBlockCnt() 
 // Shutdown flag — set ONLY by signal handler, checked in main loop.
 // sig_atomic_t is the only type guaranteed safe to write from a signal handler.
 volatile sig_atomic_t g_shutdown_requested = 0;
-
-// Zone-mode support — captured by SolvePoint() before it clears db on return
-u64  g_last_solve_dp_count = 0;
-bool g_save_tames_on_exit  = false;
 
 // ── Background .kangs checkpoint ─────────────────────────────────────────────
 // Periodically saves the full DP database in a background thread.
@@ -742,7 +750,7 @@ void ShowStats(u64 tm_start, double exp_ops, double dp_val)
 	// Elapsed color: green while under projected, red once past it
 	const char* elapsed_color = (exp_sec_total == 0xFFFFFFFFFFFFFFFFull || sec_total <= exp_sec_total)
 	                            ? RC_BGREEN : RC_BRED;
-	printf(RC_CYAN "%s" RC_RESET "Speed: " RC_BOLD "%d" RC_RESET " MKeys/s (%d GPU + %d CPU), Err: %d, DPs: " RC_YELLOW "%lluK/%lluK" RC_RESET ", WW: %lluK, Loops: %llu, Buf: %d/%d, Time: %s%llud:%02dh:%02dm:%02ds" RC_RESET "/" RC_BGREEN "%llud:%02dh:%02dm:%02ds" RC_RESET "\r\n",
+	printf(RC_CYAN "%s" RC_RESET "Speed: " RC_BOLD "%d" RC_RESET " MKeys/s (%d GPU + %d CPU), Err: %d, DPs: " RC_YELLOW "%lluK/%lluK" RC_RESET ", WW: %lluK, Loops: %llu, Buf: %d/%d, Time: %s%llud:%02dh:%02dm:%02ds" RC_RESET "/" RC_BGREEN "%llud:%02dh:%02dm:%02ds" RC_RESET "  Total (combined): " RC_BCYAN "%llud:%02dh:%02dm:%02ds" RC_RESET "\r\n",
 		mode_tag,
 		total_speed, gpu_speed, cpu_speed,
 		gTotalErrors, db.GetBlockCnt()/1000, est_dps_cnt/1000,
@@ -750,7 +758,8 @@ void ShowStats(u64 tm_start, double exp_ops, double dp_val)
 		total_loop_escapes,
 		PntIndex, MAX_CNT_LIST,
 		elapsed_color, days, hours, min, sec,
-		exp_days, exp_hours, exp_min, exp_sec);
+		exp_days, exp_hours, exp_min, exp_sec,
+		tot_days, tot_hours, tot_min, tot_sec2);
 
 	// ── Gen mode: DP count progress ─────────────────────────────────────────
 	if (gGenMode) {
@@ -776,14 +785,13 @@ void ShowStats(u64 tm_start, double exp_ops, double dp_val)
 		// update session bests (only after 10% progress to avoid noisy early readings)
 		double dp_progress = (exp_ops > 0) ? (double)PntTotalOps / exp_ops : 0.0;
 		if (cur_k > 0.01 && cur_k < g_best_k && dp_progress >= 0.10) g_best_k = cur_k;
-		// Peak speed: max instantaneous 1-second throughput seen this session.
-		// _prev_ops/_prev_ms only advance when a measurement fires (>= 1s window),
-		// so sub-second display ticks accumulate into the window instead of sliding past it.
+		// Peak speed: instantaneous speed per 10s interval
 		{
 			static u64 _prev_ops = 0;
 			static u64 _prev_ms  = 0;
 			static bool _initialized = false;
-			// Seed baseline on first call, or after a smart restart resets ops
+			// On first call (or after restart), seed baseline from current position
+			// so we don't measure inflated speed from restored ops on resume
 			if (!_initialized) {
 				_prev_ops    = PntTotalOps;
 				_prev_ms     = session_ms;
@@ -791,25 +799,27 @@ void ShowStats(u64 tm_start, double exp_ops, double dp_val)
 			} else if (PntTotalOps >= _prev_ops && session_ms > _prev_ms) {
 				u64 d_ops = PntTotalOps - _prev_ops;
 				u64 d_ms  = session_ms  - _prev_ms;
-				// Fire once per second; baseline only advances when a measurement is taken
-				// so sub-second ticks keep accumulating into the same window
+				// Guard: only update if interval is at least 1 second
 				if (d_ms >= 1000) {
 					double inst = d_ops / (d_ms / 1000.0) / 1e6;
-					if (inst > 1e9) inst = 1e9; // sanity cap
+					// Sanity cap: no GPU cluster does >1M GK/s
+					if (inst > 1e9) inst = 1e9;
 					if (inst > (double)g_session_peak_speed)
 						g_session_peak_speed = (double)inst;
-					// Only reset baseline after a successful measurement
-					_prev_ops = PntTotalOps;
-					_prev_ms  = session_ms;
 				}
-				// If d_ms < 1000: do NOT update _prev_ops/_prev_ms — let the window grow
 			} else {
 				// PntTotalOps reset (smart restart): reset baseline
 				_prev_ops    = 0;
 				_prev_ms     = 0;
 				_initialized = false;
-				return; // re-seed on next call
+				// Guard: only update peak if current reading is genuinely higher
+				// (avoid stamping a transitional low reading during auto-switch)
+				if (total_speed > g_session_peak_speed)
+					g_session_peak_speed = total_speed;
+				return; // skip _prev update below
 			}
+			_prev_ops = PntTotalOps;
+			_prev_ms  = session_ms;
 		}
 
 		// ETA based on remaining ops at current speed
@@ -853,6 +863,18 @@ void ShowStats(u64 tm_start, double exp_ops, double dp_val)
 }
 
 static void PrintSessionSummary(bool solved, double final_k = -1.0);  // forward declaration
+
+// Persist the current db (loaded tames + everything found this call) back
+// to gTamesFileName, if the caller opted in via g_save_tames_on_exit.
+// Must be called BEFORE db.Clear() -- see g_save_tames_on_exit comment.
+static void SaveTamesOnExitIfEnabled()
+{
+	if (!g_save_tames_on_exit || !gTamesFileName[0])
+		return;
+	db.Header[0] = gRange;
+	if (!db.SaveToFile(gTamesFileName))
+		printf("WARNING: zone DP checkpoint save failed: %s\r\n", gTamesFileName);
+}
 bool SolvePoint(EcPoint PntToSolve, int Range, int DP, EcInt* pk_res)
 {
 	if ((Range < 32) || (Range > 180))
@@ -1735,22 +1757,12 @@ bool SolvePoint(EcPoint PntToSolve, int Range, int DP, EcInt* pk_res)
 		g_gpu_monitor = nullptr;
 	}
 
-	// Capture DP count before any db.Clear() — zone_mode.cpp reads this after return
-	g_last_solve_dp_count = db.GetBlockCnt();
-
-	// Zone-mode: persist this zone's DP database so the next visit can resume it
-	if (g_save_tames_on_exit && gTamesFileName[0])
-	{
-		db.Header[0] = gRange;
-		if (db.SaveToFile(gTamesFileName))
-			printf("[ZoneMode] DP checkpoint saved: %llu DPs -> %s\r\n",
-			       (unsigned long long)g_last_solve_dp_count, gTamesFileName);
-	}
-
 	// User pressed Ctrl+C — save already done above, just exit cleanly.
 	if (g_shutdown_requested)
 	{
 		PrintSessionSummary(false);
+		g_last_solve_dp_count = db.GetBlockCnt();
+		SaveTamesOnExitIfEnabled();
 		db.Clear();
 		ww_db.Clear();
 		return false;
@@ -1768,6 +1780,8 @@ bool SolvePoint(EcPoint PntToSolve, int Range, int DP, EcInt* pk_res)
 				printf("tames saving failed\r\n");
 		}
 		PrintSessionSummary(false);
+		g_last_solve_dp_count = db.GetBlockCnt();
+		SaveTamesOnExitIfEnabled();
 		db.Clear();
 		ww_db.Clear();
 		return false;
@@ -1776,6 +1790,8 @@ bool SolvePoint(EcPoint PntToSolve, int Range, int DP, EcInt* pk_res)
 	double K = (double)PntTotalOps / pow(2.0, Range / 2.0);
 	printf(RC_BGREEN "Point solved, K: %.3f (with DP and GPU overheads)\r\n\r\n" RC_RESET, K);
 	PrintSessionSummary(true, K);
+	g_last_solve_dp_count = db.GetBlockCnt();
+	SaveTamesOnExitIfEnabled();
 	db.Clear();
 	ww_db.Clear();
 	*pk_res = gPrivKey;
@@ -1857,8 +1873,7 @@ static void PrintSessionSummary(bool solved, double final_k)
 	snprintf(buf, sizeof(buf), "%.0f MK/s", avg_speed);
 	row("Avg Speed", RC_CYAN, buf);
 
-	// Peak speed — floor at avg_speed to catch any tail interval < 1s at solve time
-	if (avg_speed > g_session_peak_speed) g_session_peak_speed = avg_speed;
+	// Peak speed
 	snprintf(buf, sizeof(buf), "%.0f MK/s", (double)g_session_peak_speed);
 	row("Peak Spd", RC_CYAN, buf);
 
@@ -2080,6 +2095,46 @@ bool ParseCommandLine(int argc, char* argv[])
 			printf("SOTA++ herds mode enabled\r\n");
 		}
 		else
+		if (strcmp(argument, "-zone-mode") == 0)
+		{
+			g_zone_mode = true;
+		}
+		else
+		if (strcmp(argument, "-zone-duration") == 0)
+		{
+			if (ci >= argc)
+			{
+				printf("error: missed value after -zone-duration option\r\n");
+				return false;
+			}
+			int val = atoi(argv[ci]);
+			ci++;
+			if (val < 1)
+			{
+				printf("error: invalid value for -zone-duration option (must be >= 1 minute)\r\n");
+				return false;
+			}
+			g_zone_duration_mins = val;
+		}
+		else
+		if (strcmp(argument, "-zone-force") == 0)
+		{
+			if (ci >= argc)
+			{
+				printf("error: missed value after -zone-force option\r\n");
+				return false;
+			}
+			int val = atoi(argv[ci]);
+			ci++;
+			if (val < 0 || val >= 100)
+			{
+				printf("error: invalid value for -zone-force option (must be 0-99)\r\n");
+				return false;
+			}
+			g_zone_force_id = val;
+			printf("-zone-force %d: every zone visit this run is pinned to zone %d%% (benchmarking mode)\r\n", val, val);
+		}
+		else
 		if (strcmp(argument, "-force-resume") == 0)
 		{
 			g_force_resume = true;
@@ -2198,27 +2253,6 @@ bool ParseCommandLine(int argc, char* argv[])
 				printf("Merge failed!\r\n");
 				exit(1);
 			}
-		}
-		else
-		if (strcmp(argument, "-zone-mode") == 0)
-		{
-			g_zone_mode = true;
-		}
-		else
-		if (strcmp(argument, "-zone-duration") == 0)
-		{
-			if (ci >= argc) { printf("error: missed value after -zone-duration\r\n"); return false; }
-			int val = atoi(argv[ci]); ci++;
-			if (val < 1 || val > 1440) { printf("error: -zone-duration must be 1-1440 minutes\r\n"); return false; }
-			g_zone_duration_mins = val;
-		}
-		else
-		if (strcmp(argument, "-zone-force") == 0)
-		{
-			if (ci >= argc) { printf("error: missed value after -zone-force\r\n"); return false; }
-			int val = atoi(argv[ci]); ci++;
-			if (val < 0 || val >= ZONE_COUNT) { printf("error: -zone-force must be 0-%d\r\n", ZONE_COUNT-1); return false; }
-			g_zone_force_id = val;
 		}
 		else
 		{
@@ -2432,12 +2466,18 @@ static void ripemd160_block(const uint8_t* data, size_t len, uint8_t out[20])
         uint32_t ar=h0,br=h1,cr=h2,dr=h3,er=h4;
         for (int j = 0; j < 80; j++) {
             int r = j / 16;
+            // RIPEMD-160's right line reuses the same 5 nonlinear functions
+            // as the left line, but in REVERSE order (f5,f4,f3,f2,f1 instead
+            // of f1,f2,f3,f4,f5). The previous fr formulas for r==0,1,3 did
+            // not match that spec (wrong operand groupings), which produced
+            // an incorrect hash for every input -- verified against the
+            // standard RIPEMD-160 test vectors ("", "abc", "message digest").
             uint32_t fl, fr;
-            if (r==0){ fl=(bl^cl^dl);        fr=(br|(~dr))^cr; }
-            else if(r==1){ fl=(bl&cl)|(~bl&dl); fr=(br&cr)|(dr&~cr); }
-            else if(r==2){ fl=(bl|~cl)^dl;    fr=(br|~cr)^dr; }
-            else if(r==3){ fl=(bl&dl)|(cl&~dl); fr=(br&dr)|(cr&~dr); }
-            else        { fl=bl^(cl|~dl);     fr=br^cr^dr; }
+            if (r==0){ fl=(bl^cl^dl);          fr=br^(cr|~dr); }          // f1 / f5
+            else if(r==1){ fl=(bl&cl)|(~bl&dl); fr=(br&dr)|(cr&~dr); }    // f2 / f4
+            else if(r==2){ fl=(bl|~cl)^dl;      fr=(br|~cr)^dr; }         // f3 / f3
+            else if(r==3){ fl=(bl&dl)|(cl&~dl); fr=(br&cr)|(~br&dr); }    // f4 / f2
+            else        { fl=bl^(cl|~dl);       fr=br^cr^dr; }            // f5 / f1
             uint32_t tl = ROL32(al+fl+X[RL[j]]+KL[r], SL[j]) + el;
             al=el; el=dl; dl=ROL32(cl,10); cl=bl; bl=tl;
             uint32_t tr = ROL32(ar+fr+X[RR[j]]+KR[r], SR[j]) + er;
@@ -2463,8 +2503,11 @@ static void PubKeyToSWP(const EcPoint& pub, char* addr)
     // 1. Compressed pubkey -> hash160
     uint8_t pk[33];
     pk[0] = ((pub.y.data[0] & 1) == 0) ? 0x02 : 0x03;
+    // EcInt.data is u64[4+1] (little-endian 64-bit limbs), NOT u32[8] --
+    // byte i (0=MSB of the 256-bit X coordinate) lives in word (3 - i/8),
+    // at bit offset 8*(7 - i%8) within that word.
     for (int i = 0; i < 32; i++)
-        pk[1+i] = (uint8_t)((pub.x.data[7-(i/4)] >> (8*(3-(i%4)))) & 0xFF);
+        pk[1+i] = (uint8_t)((pub.x.data[3-(i/8)] >> (8*(7-(i%8)))) & 0xFF);
     uint8_t sha[32], rmd[20];
     sha256_block(pk, 33, sha);
     ripemd160_block(sha, 32, rmd);
@@ -2530,8 +2573,11 @@ static void PubKeyToAddress(const EcPoint& pub, char* addr)
 {
     uint8_t pk[33];
     pk[0] = ((pub.y.data[0] & 1) == 0) ? 0x02 : 0x03;
+    // EcInt.data is u64[4+1] (little-endian 64-bit limbs), NOT u32[8] --
+    // byte i (0=MSB of the 256-bit X coordinate) lives in word (3 - i/8),
+    // at bit offset 8*(7 - i%8) within that word.
     for (int i = 0; i < 32; i++)
-        pk[1+i] = (uint8_t)((pub.x.data[7-(i/4)] >> (8*(3-(i%4)))) & 0xFF);
+        pk[1+i] = (uint8_t)((pub.x.data[3-(i/8)] >> (8*(7-(i%8)))) & 0xFF);
     uint8_t sha[32], rmd[20];
     sha256_block(pk, 33, sha);
     ripemd160_block(sha, 32, rmd);
@@ -2618,6 +2664,18 @@ int main(int argc, char* argv[])
     TotalOps = 0; TotalSolved = 0; gTotalErrors = 0;
     IsBench = gPubKey.x.IsZero();
 
+    // Ctrl+C / SIGTERM handling must be registered unconditionally, not only
+    // when -workfile is set -- SolvePoint()'s own shutdown handling (thread
+    // teardown, DP checkpoint save via SaveTamesOnExitIfEnabled(), etc.)
+    // already checks g_shutdown_requested regardless of mode, but none of
+    // that fires if the signal was never caught in the first place. Without
+    // this, Ctrl+C without -workfile falls through to the OS default
+    // (immediate kill, zero cleanup, nothing saved) -- which is exactly
+    // what was happening for every zone-mode run so far, since none of
+    // those commands passed -workfile.
+    signal(SIGINT,  SignalHandler);
+    signal(SIGTERM, SignalHandler);
+
     // ── Work file + session state ────────────────────────────────────────────
     if (!g_work_filename.empty() && !IsBench && !gGenMode)
     {
@@ -2674,8 +2732,7 @@ int main(int argc, char* argv[])
             printf(RC_BGREEN "Auto-save: every %llu seconds -> %s" RC_RESET "\r\n",
                    (unsigned long long)g_autosave_interval, g_work_filename.c_str());
         }
-        signal(SIGINT,  SignalHandler);
-        signal(SIGTERM, SignalHandler);
+        // signal() registration moved earlier -- now unconditional, see above.
     }
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -2710,11 +2767,18 @@ int main(int argc, char* argv[])
 
         if (g_zone_mode)
         {
+            // RunZoneModeV2 owns its own zone loop/retry logic and returns
+            // the ALREADY absolute private key in pk_found (it resolves
+            // each zone's own offset internally) -- unlike the plain
+            // SolvePoint() path below, it must NOT be AddModP(gStart)'d
+            // again here.
             bool zone_solved = false;
             RunZoneModeV2(gPubKey, (int)gRange, (int)gRange, &pk_found, &zone_solved);
             if (!zone_solved)
+            {
+                printf("Zone mode: key not found in this session (see zone_registry.bin to resume)\r\n");
                 goto label_end;
-            // pk_found already has gStart added by RunZoneModeV2 — skip the AddModP below
+            }
         }
         else
         {
@@ -2853,4 +2917,13 @@ int main(int argc, char* argv[])
             u64 ops_per_pnt = TotalOps / TotalSolved;
             double K_bench = (double)ops_per_pnt / pow(2.0, gRange / 2.0);
             printf("K: %.3f, ops: 2^%.3f, avg: 2^%.3f\r\n\r\n",
-                   K_bench, log2((double)PntTotalOps), log2((doubl
+                   K_bench, log2((double)PntTotalOps), log2((double)ops_per_pnt));
+        }
+    }
+
+label_end:
+    SaveSessionState();
+    if (g_autosave)  { delete g_autosave;  g_autosave  = nullptr; }
+    if (g_work_file) { delete g_work_file; g_work_file = nullptr; }
+    return 0;
+}
